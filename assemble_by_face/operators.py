@@ -1,10 +1,14 @@
 """Pick a face on each of two objects, then assemble them face to face."""
 
+import time
+
 import bmesh
 import bpy
 from bpy_extras import view3d_utils
 from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
+
+from . import merge
 
 
 def tools_enabled(context):
@@ -118,6 +122,10 @@ def assemble(scene):
 
     set_origin(fixed, p_fixed)
     set_origin(moving, p_fixed)
+    # Remember which way the parts joined, so Merge can close gaps across the
+    # joined faces: the fixed face's outward normal points at the moved part.
+    s.fit_target, s.fit_moving = fixed, moving
+    s.fit_axis = fixed.matrix_world.to_3x3().inverted() @ n_fixed
     a.clear()
     b.clear()
     return fixed, moving, p_fixed
@@ -261,6 +269,147 @@ class ABF_OT_clear_faces(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# --------------------------------------------------------------------------
+# Merge (the same as in Assemble by Points)
+# --------------------------------------------------------------------------
+
+def selected_meshes(context):
+    return [o for o in context.selected_objects if o.type == "MESH"]
+
+
+def assembled_size(objects):
+    """Largest dimension of the objects' combined world bounding box: the
+    reference that the merge percentages are taken of."""
+    corners = [o.matrix_world @ Vector(c) for o in objects for c in o.bound_box]
+    if not corners:
+        return 0.0
+    return max(max(c[i] for c in corners) - min(c[i] for c in corners) for i in range(3))
+
+
+def merge_settings(context, objects):
+    """(merge distance, max gap, seam width) in scene units for these objects."""
+    s = context.scene.assemble_by_face
+    size = assembled_size(objects)
+    return tuple(size * pct / 100 for pct in (s.merge_pct, s.gap_pct, s.seam_pct))
+
+
+class _ObjectModeScope:
+    """Leave edit mode for the duration, then restore it."""
+
+    def __init__(self, context):
+        self.was_edit = context.mode == "EDIT_MESH"
+
+    def __enter__(self):
+        if self.was_edit:
+            bpy.ops.object.mode_set(mode="OBJECT")
+        return self
+
+    def __exit__(self, *exc):
+        if self.was_edit:
+            bpy.ops.object.mode_set(mode="EDIT")
+        return False
+
+
+class ABF_OT_merge(bpy.types.Operator):
+    """Merge the selected objects into one new, closed mesh: close small gaps across
+    the joined faces, union them, and remove internal voids"""
+    bl_idname = "assemble_by_face.merge"
+    bl_label = "Merge Into New Object"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not _enabled_poll(cls, context):
+            return False
+        if len(selected_meshes(context)) < 2:
+            cls.poll_message_set("Select at least two mesh objects")
+            return False
+        return True
+
+    def execute(self, context):
+        s = context.scene.assemble_by_face
+        t0 = time.perf_counter()
+        with _ObjectModeScope(context):
+            objects = selected_meshes(context)
+            active = context.active_object
+            if active in objects:                    # active first: it names the result
+                objects.remove(active)
+                objects.insert(0, active)
+
+            gap_pair, axis = self._gap_axis(context, objects)
+            spacing, max_gap, seam_width = merge_settings(context, objects)
+            try:
+                result, report = merge.merge(objects, context, spacing, max_gap,
+                                             seam_width=seam_width, gap_pair=gap_pair,
+                                             axis=axis)
+            except ValueError as err:
+                self.report({"ERROR"}, str(err))
+                return {"CANCELLED"}
+
+            for o in objects:
+                o.select_set(False)
+                o.hide_set(True)
+            result.select_set(True)
+            context.view_layer.objects.active = result
+
+        notes = []
+        if report["holes_filled"]:
+            notes.append(f"filled {report['holes_filled']} hole(s) in the input meshes")
+        if report["gap_vertices_moved"]:
+            notes.append(f"closed gaps at {report['gap_vertices_moved']} vertices")
+        elif gap_pair is None and s.gap_pct > 0:
+            notes.append("gaps not closed (use Assemble on these parts first)")
+        if report["edges_split"] or report["seam_split"]:
+            notes.append(f"split {report['edges_split'] + report['seam_split']} coarse edges")
+        if report["seam_collapsed"]:
+            notes.append(f"merged {report['seam_collapsed']} crowded vertices at the seam")
+        if report["seam_smoothed"]:
+            notes.append(f"smoothed the seam ({report['seam_smoothed']} vertices)")
+        if report["voids_removed"]:
+            notes.append(f"removed {report['voids_removed']} internal void(s)")
+        if report["faces_repaired"]:
+            notes.append(f"repaired {report['faces_repaired']} faces")
+        ok = report["is_manifold"] and report["shells"] == 1
+        state = "one closed, printable shell" if ok else merge.describe(report)
+        if report["shells"] > 1:
+            state += f"; {report['shells']} separate pieces (the parts don't touch everywhere)"
+        msg = (f"Created '{result.name}' in {time.perf_counter() - t0:.1f}s "
+               f"({len(result.data.polygons)} faces): {state}")
+        if notes:
+            msg += ". " + "; ".join(notes).capitalize()
+        self.report({"INFO"} if ok else {"WARNING"}, msg)
+        return {"FINISHED"}
+
+    @staticmethod
+    def _gap_axis(context, objects):
+        """((fixed, moved), world axis) to close gaps along, or (None, None):
+        the joined faces' direction from the last Assemble on these parts."""
+        s = context.scene.assemble_by_face
+        t, m = s.fit_target, s.fit_moving
+        if t in objects and m in objects and Vector(s.fit_axis).length > 0:
+            return (t, m), (t.matrix_world.to_3x3() @ Vector(s.fit_axis)).normalized()
+        return None, None
+
+
+class ABF_OT_check_manifold(bpy.types.Operator):
+    """Report whether each selected mesh is a closed manifold"""
+    bl_idname = "assemble_by_face.check_manifold"
+    bl_label = "Check Manifold"
+
+    @classmethod
+    def poll(cls, context):
+        return _enabled_poll(cls, context) and bool(selected_meshes(context))
+
+    def execute(self, context):
+        with _ObjectModeScope(context):
+            lines = [f"{o.name}: {merge.describe(merge.manifold_report(o.data))}"
+                     for o in selected_meshes(context)]
+        all_ok = all(line.endswith(": manifold") for line in lines)
+        self.report({"INFO"} if all_ok else {"WARNING"}, " | ".join(lines))
+        return {"FINISHED"}
+
+
+
 def _redraw_viewports(context):
     for area in context.screen.areas if context.screen else ():
         if area.type == "VIEW_3D":
@@ -297,7 +446,8 @@ def unregister_keymaps():
     _keymaps.clear()
 
 
-classes = (ABF_OT_select_faces, ABF_OT_assemble, ABF_OT_clear_faces)
+classes = (ABF_OT_select_faces, ABF_OT_assemble, ABF_OT_clear_faces, ABF_OT_merge,
+           ABF_OT_check_manifold)
 
 
 def register():

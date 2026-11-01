@@ -27,6 +27,8 @@ def reset():
     s = bpy.context.scene.assemble_by_face
     s.face_a.clear()
     s.face_b.clear()
+    for prop in ("merge_pct", "gap_pct", "seam_pct", "fit_target", "fit_moving", "fit_axis"):
+        s.property_unset(prop)
     s.enabled = True
 
 
@@ -159,6 +161,89 @@ def test_shared_mesh_is_refused():
         assert "shares its mesh" in str(err), err
         result = {"CANCELLED"}
     assert result == {"CANCELLED"}
+
+
+def volume(obj):
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.transform(obj.matrix_world)
+    vol = bm.calc_volume(signed=True)
+    bm.free()
+    return vol
+
+
+def assembled_pair(gap=0.0):
+    """A 4x4x2 base with a 2x2x2 block assembled onto its top, corner to corner
+    (so the block sits on the base's corner quarter), then optionally lifted
+    ``gap`` along the joined faces' normal."""
+    a = box("Base", (4, 4, 2))
+    b = box("Block", (2, 2, 2), Matrix.Translation((6, -3, 4)))
+    s = bpy.context.scene.assemble_by_face
+    click(s.face_a, a, face_facing(a, (0, 0, 1)), (2, 2, 1))
+    fb = face_facing(b, (0, 0, -1))
+    # its bottom corner furthest along +x+y, so the block lands over the base
+    click(s.face_b, b, fb, max(operators.face_world(b, fb), key=lambda p: p.x + p.y))
+    assert bpy.ops.assemble_by_face.assemble() == {"FINISHED"}
+    if gap:
+        b.matrix_world = Matrix.Translation((0, 0, gap)) @ b.matrix_world
+    return a, b
+
+
+def merge_selected(a, b):
+    for o in bpy.context.scene.objects:
+        o.select_set(o in (a, b))
+    bpy.context.view_layer.objects.active = a
+    assert bpy.ops.assemble_by_face.merge() == {"FINISHED"}
+    result = bpy.context.view_layer.objects.active
+    from assemble_by_face import merge
+    rep = merge.manifold_report(result.data)
+    vol = volume(result)
+    print(f"  merged: {merge.describe(rep)}, {rep['shells']} shell(s), "
+          f"{len(result.data.polygons)} faces, volume {vol:.3f}")
+    return result, rep, vol
+
+
+def test_merge_needs_two_meshes():
+    reset()
+    a = box("A", (2, 2, 2))
+    a.select_set(True)
+    bpy.context.view_layer.objects.active = a
+    assert not bpy.ops.assemble_by_face.merge.poll()
+
+
+def test_merge_after_assemble():
+    """Faces in exact contact after Assemble merge into one closed shell."""
+    reset()
+    a, b = assembled_pair()
+    result, rep, vol = merge_selected(a, b)
+    assert rep["is_manifold"] and rep["shells"] == 1, rep
+    assert abs(vol - 40) < 0.2, vol
+    assert a.hide_get() and b.hide_get()                 # originals hidden, kept
+
+
+def test_merge_closes_a_small_gap_across_the_joined_faces():
+    """Lifted 0.03 after assembling (1% of these 4-unit parts is 0.04): Merge
+    closes the gap along the remembered direction of the joined faces."""
+    reset()
+    a, b = assembled_pair(gap=0.03)
+    result, rep, vol = merge_selected(a, b)
+    assert rep["is_manifold"] and rep["shells"] == 1, rep
+    assert 40 < vol < 40 + 4 * 0.03 + 0.2, vol            # the gap got filled in
+
+
+def test_merge_leaves_a_wide_gap_alone():
+    reset()
+    a, b = assembled_pair(gap=0.5)
+    _result, rep, _vol = merge_selected(a, b)
+    assert rep["shells"] == 2, rep
+
+
+def test_merge_without_assemble_does_not_close_gaps():
+    reset()
+    a = box("Base", (4, 4, 2))
+    b = box("Block", (2, 2, 2), Matrix.Translation((1, 1, 2.03)))
+    _result, rep, _vol = merge_selected(a, b)
+    assert rep["shells"] == 2, rep
 
 
 # ---------------------------------------------------------------- runner

@@ -4,10 +4,10 @@
 # still present, so reload every submodule (dependencies first) to pick up edits.
 if "operators" in locals():
     import importlib
-    for _mod in (properties, operators, ui):  # noqa: F821
+    for _mod in (merge, properties, operators, ui):  # noqa: F821
         importlib.reload(_mod)
 
-from . import operators, properties, ui  # noqa: E402
+from . import merge, operators, properties, ui  # noqa: E402
 
 _modules = (properties, operators, ui)
 

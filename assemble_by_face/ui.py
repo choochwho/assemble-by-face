@@ -72,6 +72,39 @@ class VIEW3D_PT_assemble_by_face(bpy.types.Panel):
             box.label(text=draw_error)
 
 
+class VIEW3D_PT_assemble_by_face_merge(bpy.types.Panel):
+    bl_label = "Merge"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Assemble by Face"
+
+    @classmethod
+    def poll(cls, context):
+        return tools_enabled(context)
+
+    def draw(self, context):
+        s = context.scene.assemble_by_face
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(s, "merge_pct")
+        layout.prop(s, "gap_pct")
+        layout.prop(s, "seam_pct")
+        meshes = [o for o in context.selected_objects if o.type == "MESH"]
+        if len(meshes) >= 2:
+            unit = context.scene.unit_settings
+            fmt = lambda v: bpy.utils.units.to_string(unit.system, "LENGTH",
+                                                      v * unit.scale_length, precision=3)
+            size = operators.assembled_size(meshes)
+            spacing, gap, seam = operators.merge_settings(context, meshes)
+            _wrapped(layout, context,
+                     f"The selected parts span {fmt(size)} (their combined size, once "
+                     f"they're joined), so 1% = {fmt(size / 100)}: merge {fmt(spacing)}, "
+                     f"gaps {fmt(gap)}, seam {fmt(seam)}.")
+        layout.operator("assemble_by_face.merge", icon="MOD_BOOLEAN")
+        layout.operator("assemble_by_face.check_manifold", icon="CHECKMARK")
+
+
 # --------------------------------------------------------------------------
 # Viewport highlight of the picked faces. The hooks only exist while the
 # tools are on, and are re-added just after register (see _resync_drawing).
@@ -220,7 +253,7 @@ def _on_load(_dummy):
     sync_drawing()
 
 
-classes = (VIEW3D_PT_assemble_by_face,)
+classes = (VIEW3D_PT_assemble_by_face, VIEW3D_PT_assemble_by_face_merge)
 
 
 def register():
