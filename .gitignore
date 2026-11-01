@@ -3,3 +3,6 @@ __pycache__/
 dist/
 *.blend1
 *.blend2
+
+# demo video, kept out of the repository
+Video Project 5.mp4
