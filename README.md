@@ -2,6 +2,13 @@
 
 Assemble mesh parts by their faces. This is the sister project to Assemble by Points, kept as a separate repository and extension package.
 
+## Install
+
+1. Download `assemble_by_face-<version>.zip` from the repository's **Releases** page.
+2. In Blender, go to **Edit → Preferences → Get Extensions → ▾ (top right) → Install from Disk…** and pick the zip.
+
+The tools appear in the 3D Viewport sidebar (**N**) under the **Assemble by Face** tab.
+
 ## Use
 
 Open the **Assemble by Face** tab in the 3D Viewport sidebar (**N**) and tick its checkbox. While it's off, the add-on draws nothing and its tools are disabled.
